@@ -1,0 +1,251 @@
+# Part 1: Data Preparation
+
+import pandas as pd
+
+# ========= 1. 文件路径 =========
+strategies_file = "stradegies.xlsx"
+problems_file = "Problem_from_studentsurvey.xlsx"
+
+# ========= 2. 需要读取的年份 =========
+years = ["2021", "2022", "2023", "2024"]
+
+# ========= 3. 合并 strategies =========
+strategy_dfs = []
+
+for year in years:
+    df = pd.read_excel(strategies_file, sheet_name=year)
+    df["year"] = year
+    df["strategy_id"] = [f"{year}_S{i+1:03d}" for i in range(len(df))]
+    strategy_dfs.append(df)
+
+strategies_long = pd.concat(strategy_dfs, ignore_index=True)
+
+# ========= 4. 合并 problems =========
+problem_dfs = []
+
+for year in years:
+    df = pd.read_excel(problems_file, sheet_name=year)
+    df["year"] = year
+    df["problem_id"] = [f"{year}_P{i+1:03d}" for i in range(len(df))]
+    problem_dfs.append(df)
+
+problems_long = pd.concat(problem_dfs, ignore_index=True)
+
+# ========= 5. 看看结果 =========
+print("strategies_long shape:", strategies_long.shape)
+print("problems_long shape:", problems_long.shape)
+
+print("\n--- strategies_long preview ---")
+print(strategies_long.head())
+
+print("\n--- problems_long preview ---")
+print(problems_long.head())
+
+# ========= 6. 统一列名 =========
+strategies_long = strategies_long.rename(columns={
+    "Design Method": "strategy_text",
+    "Time Dimension": "time_dimension",
+    "Scale": "scale",
+    "Area of Specialization": "area_of_specialization",
+    "Interdisciplinary": "interdisciplinary",
+    "Type": "type"
+})
+
+# ========= 7. 只保留当前阶段需要的列 =========
+strategies_long = strategies_long[
+    [
+        "strategy_id",
+        "year",
+        "strategy_text",
+        "time_dimension",
+        "scale",
+        "area_of_specialization",
+        "interdisciplinary",
+        "type"
+    ]
+]
+
+problems_long = problems_long[
+    [
+        "problem_id",
+        "problem",
+        "tags"
+    ]
+]
+
+print("\n--- renamed strategies_long ---")
+print(strategies_long.head())
+
+print("\n--- renamed problems_long ---")
+print(problems_long.head())
+
+# ========= 8. 处理空值以及年份 =========
+problems_long["year"] = problems_long["problem_id"].str.split("_").str[0].astype(int)
+strategies_long["strategy_text"] = strategies_long["strategy_text"].fillna("").astype(str)
+problems_long["problem"] = problems_long["problem"].fillna("").astype(str)
+problems_long["tags"] = problems_long["tags"].fillna("").astype(str)
+
+# 其他 metadata 也顺手处理一下
+for col in ["time_dimension", "scale", "area_of_specialization", "interdisciplinary", "type"]:
+    strategies_long[col] = strategies_long[col].fillna("").astype(str)
+
+print("\nMissing values check:")
+print(strategies_long.isna().sum())
+print(problems_long.isna().sum())
+
+# ========= 9. 将 tags 拆分为列表 =========
+problems_long["tag_list"] = problems_long["tags"].apply(
+    lambda x: [tag.strip() for tag in x.split(";") if tag.strip()]
+)
+
+print("\n--- tag_list preview ---")
+print(problems_long[["problem_id", "tags", "tag_list"]].head())
+
+# ========= 10. 构造 query text =========
+problems_long["query_text"] = problems_long.apply(
+    lambda row: row["problem"] + " " + " ".join(row["tag_list"]),
+    axis=1
+)
+
+print("\n--- query_text preview ---")
+print(problems_long[["problem_id", "query_text"]].head())
+
+# ========= 11. 保存整理后的长表 =========
+strategies_long.to_csv("strategies_long.csv", index=False)
+problems_long.to_csv("problems_long.csv", index=False)
+
+print("\nFiles saved:")
+print("- strategies_long.csv")
+print("- problems_long.csv")
+
+### Part 2: NLP Validation (to be implemented) ###
+
+import re
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ========= Step 2.1: clean text =========
+def clean_text(text):
+    text = str(text).lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+strategies_long["strategy_text_clean"] = strategies_long["strategy_text"].apply(clean_text)
+problems_long["query_text_clean"] = problems_long["query_text"].apply(clean_text)
+
+print("\n--- cleaned strategy text preview ---")
+print(strategies_long[["strategy_id", "strategy_text", "strategy_text_clean"]].head())
+
+print("\n--- cleaned query text preview ---")
+print(problems_long[["problem_id", "query_text", "query_text_clean"]].head())
+
+# ========= Step 2.2: TF-IDF =========
+strategy_corpus = strategies_long["strategy_text_clean"].tolist()
+problem_queries = problems_long["query_text_clean"].tolist()
+
+vectorizer = TfidfVectorizer(stop_words="english")
+strategy_matrix = vectorizer.fit_transform(strategy_corpus)
+problem_matrix = vectorizer.transform(problem_queries)
+
+similarity_matrix = cosine_similarity(problem_matrix, strategy_matrix)
+print("\nsimilarity_matrix shape:", similarity_matrix.shape)
+
+# ========= Step 2.3: retrieve top 5 =========
+top_k = 5
+results = []
+
+for i, problem_row in problems_long.iterrows():
+    scores = similarity_matrix[i]
+    top_indices = np.argsort(scores)[::-1][:top_k]
+    
+    for rank, idx in enumerate(top_indices, start=1):
+        results.append({
+            "problem_id": problem_row["problem_id"],
+            "problem": problem_row["problem"],
+            "query_text": problem_row["query_text"],
+            "rank": rank,
+            "strategy_id": strategies_long.iloc[idx]["strategy_id"],
+            "strategy_text": strategies_long.iloc[idx]["strategy_text"],
+            "tfidf_score": scores[idx],
+            "problem_year": problem_row["year"],
+            "strategy_year": strategies_long.iloc[idx]["year"]
+        })
+
+tfidf_results = pd.DataFrame(results)
+
+print("\n--- tfidf_results preview ---")
+print(tfidf_results.head(10))
+
+# ========= Step 2.4: save =========
+tfidf_results.to_csv("tfidf_top5_results.csv", index=False)
+print("\nSaved: tfidf_top5_results.csv")
+
+# ========= Step 2.5: inspect one problem =========
+sample_problem_id = "2021_P001"
+sample_results = tfidf_results[tfidf_results["problem_id"] == sample_problem_id].copy()
+print(sample_results[["problem_id", "rank", "strategy_id", "strategy_text", "tfidf_score"]])
+
+print("\n--- sample problem results ---")
+print(sample_results[["problem_id", "rank", "strategy_id", "strategy_text", "tfidf_score"]])
+
+# ========= Step 3: same-year TF-IDF top 5 =========
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import pandas as pd
+
+same_year_results = []
+top_k = 10
+
+years = ["2021", "2022", "2023", "2024"]
+# unify year type
+problems_long["year"] = problems_long["year"].astype(str)
+strategies_long["year"] = strategies_long["year"].astype(str)
+
+for year in years:
+    # 只取当年的 problems 和 strategies
+    year_problems = problems_long[problems_long["year"] == year].copy()
+    year_strategies = strategies_long[strategies_long["year"] == year].copy()
+    
+    # 文本列表
+    strategy_corpus = year_strategies["strategy_text_clean"].tolist()
+    problem_queries = year_problems["query_text_clean"].tolist()
+
+    # TF-IDF
+    vectorizer = TfidfVectorizer(stop_words="english")
+    strategy_matrix = vectorizer.fit_transform(strategy_corpus)
+    problem_matrix = vectorizer.transform(problem_queries)
+    
+    similarity_matrix = cosine_similarity(problem_matrix, strategy_matrix)
+    
+    # 取 top k
+    for i, problem_row in year_problems.reset_index(drop=True).iterrows():
+        scores = similarity_matrix[i]
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        
+        for rank, idx in enumerate(top_indices, start=1):
+            same_year_results.append({
+                "problem_id": problem_row["problem_id"],
+                "problem": problem_row["problem"],
+                "query_text": problem_row["query_text"],
+                "rank": rank,
+                "strategy_id": year_strategies.iloc[idx]["strategy_id"],
+                "strategy_text": year_strategies.iloc[idx]["strategy_text"],
+                "tfidf_score": scores[idx],
+                "problem_year": problem_row["year"],
+                "strategy_year": year_strategies.iloc[idx]["year"]
+            })
+
+
+same_year_tfidf_results = pd.DataFrame(same_year_results)
+same_year_tfidf_results["manual_relevance"] = ""
+same_year_tfidf_results["notes"] = ""
+
+print(same_year_tfidf_results.head(10))
+print("\nshape:", same_year_tfidf_results.shape)
+
+same_year_tfidf_results.to_csv("tfidf_top10_same_year_results.csv", index=False)
+print("Saved: tfidf_top10_same_year_results.csv")
